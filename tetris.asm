@@ -462,14 +462,11 @@ check_collision:
     cmp   r8d, 4
     jge   .pr_next
 
-    ; extract bit
-    mov   eax, ecx          ; bitmask
-    mov   ecx, 3
-    sub   ecx, r8d
-    shr   eax, cl
-    and   eax, 1
-    test  eax, eax
-    jz    .pc_next
+    ; extract bit (bt preserves ecx = bitmask across iterations)
+    mov   eax, 3
+    sub   eax, r8d
+    bt    ecx, eax          ; CF = bit(3-col) of bitmask
+    jnc   .pc_next
 
     ; board position
     mov   eax, r15d         ; by = py + piece_row
