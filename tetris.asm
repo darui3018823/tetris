@@ -1598,6 +1598,7 @@ main:
     call  flush_buf
 
 .sleep:
+    call  flush_buf
     mov   ecx, 16
     call  Sleep
     jmp   .game_loop
