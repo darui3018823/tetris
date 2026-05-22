@@ -117,7 +117,7 @@ tetromino_data:
 
 ; Fall delay (ms) per level index 0-9
 fall_delays:
-    dd 800,720,630,550,470,380,300,220,130,100
+    dd 1000,900,800,700,600,480,360,240,140,100
 
 ; Score per lines cleared (multiplied by level)
 score_table:
@@ -155,7 +155,7 @@ prev_space:     resb 1
 hstdout:        resq 1
 rand_seed:      resq 1
 
-render_buf:     resb 4096
+render_buf:     resb 16384
 render_len:     resd 1
 
 num_scratch:    resb 24         ; scratch for uint→string
@@ -197,7 +197,7 @@ extern ExitProcess
 buf_byte:
     push  rbx
     mov   ebx, [render_len]
-    cmp   ebx, 4090
+    cmp   ebx, 16376
     jge   .skip
     lea   rcx, [render_buf]
     mov   [rcx + rbx], al
@@ -217,7 +217,7 @@ buf_cstr:
     movzx eax, byte [rsi]
     test  al, al
     jz    .done
-    cmp   ebx, 4090
+    cmp   ebx, 16376
     jge   .done
     lea   rcx, [render_buf]
     mov   [rcx + rbx], al
@@ -349,13 +349,15 @@ init_console:
     call  GetStdHandle
     mov   [hstdout], rax
 
-    ; GetConsoleMode → [rsp+40] (above shadow space [rsp..rsp+31])
+    ; GetConsoleMode → [rsp+40]  (zero first; safe fallback if call fails)
+    mov   qword [rsp + 40], 0
     mov   rcx, [hstdout]
     lea   rdx, [rsp + 40]
     call  GetConsoleMode
 
+    ; OR in VT + required output flags: PROCESSED(1) | WRAP_AT_EOL(2) | VT(4) = 7
     mov   eax, [rsp + 40]
-    or    eax, ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    or    eax, ENABLE_PROCESSED_OUTPUT | 0x0002 | ENABLE_VIRTUAL_TERMINAL_PROCESSING
     mov   rcx, [hstdout]
     mov   edx, eax
     call  SetConsoleMode
@@ -1567,7 +1569,7 @@ main:
     sub   rax, rcx          ; elapsed ms
     pop   rcx               ; delay ms
     cmp   rax, rcx
-    jl    .sleep
+    jb    .sleep
 
     call  erase_piece
     call  soft_drop
