@@ -36,6 +36,7 @@ FALL_LEVELS equ 10
 section .data
 
 title_str   db "TETRIS", 0
+conout_str  db "CONOUT$", 0
 
 ; ANSI sequences
 ESC_HIDE    db 0x1B,"[?25l",0
@@ -164,6 +165,7 @@ num_scratch:    resb 24         ; scratch for uint→string
 section .text
 global main
 
+extern CreateFileA
 extern GetStdHandle
 extern GetConsoleMode
 extern SetConsoleMode
@@ -342,21 +344,29 @@ buf_reset:
 init_console:
     push  rbp
     mov   rbp, rsp
-    ; 32 shadow + 8 mode_local + 8 pad = 48 (divisible by 16 → aligned)
-    sub   rsp, 48
+    ; Frame: 32 shadow + 24 (args5-7) + 8 mode_local = 64 (16-byte aligned)
+    sub   rsp, 64
 
-    mov   ecx, STD_OUTPUT_HANDLE
-    call  GetStdHandle
+    ; CreateFileA("CONOUT$", GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|WRITE,
+    ;             NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)
+    lea   rcx, [conout_str]
+    mov   edx, 0xC0000000        ; GENERIC_READ | GENERIC_WRITE
+    mov   r8d, 3                 ; FILE_SHARE_READ | FILE_SHARE_WRITE
+    xor   r9d, r9d               ; lpSecurityAttributes = NULL
+    mov   qword [rsp + 32], 3   ; OPEN_EXISTING
+    mov   qword [rsp + 40], 0x80 ; FILE_ATTRIBUTE_NORMAL
+    mov   qword [rsp + 48], 0   ; hTemplateFile = NULL
+    call  CreateFileA
     mov   [hstdout], rax
 
-    ; GetConsoleMode → [rsp+40]  (zero first; safe fallback if call fails)
-    mov   qword [rsp + 40], 0
+    ; GetConsoleMode → [rsp+56]  (above arg slots; zero first as fallback)
+    mov   qword [rsp + 56], 0
     mov   rcx, [hstdout]
-    lea   rdx, [rsp + 40]
+    lea   rdx, [rsp + 56]
     call  GetConsoleMode
 
-    ; OR in VT + required output flags: PROCESSED(1) | WRAP_AT_EOL(2) | VT(4) = 7
-    mov   eax, [rsp + 40]
+    ; OR in PROCESSED(1) | WRAP_AT_EOL(2) | VT(4) = 7
+    mov   eax, [rsp + 56]
     or    eax, ENABLE_PROCESSED_OUTPUT | 0x0002 | ENABLE_VIRTUAL_TERMINAL_PROCESSING
     mov   rcx, [hstdout]
     mov   edx, eax
@@ -369,7 +379,7 @@ init_console:
     call  buf_cstr
     call  flush_buf
 
-    add   rsp, 48
+    add   rsp, 64
     pop   rbp
     ret
 
