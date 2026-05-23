@@ -116,9 +116,9 @@ tetromino_data:
     db 0b0000,0b1110,0b1000,0b0000
     db 0b0000,0b1100,0b0100,0b0100
 
-; Fall delay (ms) per level index 0-9
+; Fall delay (ms) per level index 0-9  (NES/NTSC: frames/60*1000)
 fall_delays:
-    dd 1000,900,800,700,600,480,360,240,140,100
+    dd 717,633,550,467,383,300,217,133,100,83
 
 ; Score per lines cleared (multiplied by level)
 score_table:
@@ -145,6 +145,7 @@ lines_cleared:  resd 1
 game_over_flag: resb 1          ; 0=play, 1=over, 2=restart
 
 fall_time:      resq 1          ; tick of last gravity step
+lock_time:      resq 1          ; tick when piece first touched ground (0=airborne)
 das_time:       resq 1          ; tick of last DAS repeat
 das_active:     resb 1
 
@@ -174,6 +175,7 @@ extern WriteFile
 extern GetAsyncKeyState
 extern GetTickCount64
 extern Sleep
+extern SetConsoleOutputCP
 extern ExitProcess
 
 ; ─── Macros ──────────────────────────────────────────────────────────────────
@@ -347,6 +349,9 @@ init_console:
     ; Frame: 32 shadow + 24 (args5-7) + 8 mode_local = 64 (16-byte aligned)
     sub   rsp, 64
 
+    mov   ecx, 65001            ; UTF-8 codepage
+    call  SetConsoleOutputCP
+
     ; CreateFileA("CONOUT$", GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|WRITE,
     ;             NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)
     lea   rcx, [conout_str]
@@ -452,8 +457,8 @@ check_collision:
     mov   dl,  r13b
     mov   r8b, bl
     call  get_piece_row
-    movzx ecx, al
-    test  ecx, ecx
+    movzx r11d, al          ; bitmask in r11d  (lea rcx,[board] later clobbers rcx/ecx)
+    test  r11d, r11d
     jz    .pr_next
 
     ; iterate cols
@@ -462,10 +467,9 @@ check_collision:
     cmp   r8d, 4
     jge   .pr_next
 
-    ; extract bit (bt preserves ecx = bitmask across iterations)
     mov   eax, 3
     sub   eax, r8d
-    bt    ecx, eax          ; CF = bit(3-col) of bitmask
+    bt    r11d, eax         ; CF = bit(3-col) of bitmask
     jnc   .pc_next
 
     ; board position
@@ -1101,6 +1105,7 @@ spawn_piece:
 
     call  GetTickCount64
     mov   [fall_time], rax
+    mov   qword [lock_time], 0
 
     PROC_LEAVE
 
@@ -1508,6 +1513,7 @@ init_game:
     mov   byte [prev_up],     0
     mov   byte [prev_space],  0
     mov   byte [das_active],  0
+    mov   qword [lock_time],  0
     mov   dword [render_len], 0
 
     call  GetTickCount64
@@ -1569,30 +1575,81 @@ main:
 
     ; ── Gravity ──────────────────────────────────────────────────────────────
 .gravity:
-    call  get_fall_delay    ; EAX = delay ms
-    push  rax               ; save delay
-    call  GetTickCount64
-    mov   rcx, [fall_time]
-    sub   rax, rcx          ; elapsed ms
-    pop   rcx               ; delay ms
-    cmp   rax, rcx
-    jb    .sleep
+    ; Lock delay check (runs every tick when piece is on ground)
+    cmp   qword [lock_time], 0
+    jz    .fall_check
 
-    call  erase_piece
-    call  soft_drop
+    ; Verify piece is still on ground (player may have slid it off)
+    movsx r9d, byte [cur_y]
+    inc   r9d
+    movzx ecx, byte [cur_type]
+    movzx edx, byte [cur_rot]
+    movzx r8d, byte [cur_x]
+    mov   r8b, r8b
+    mov   r9b, r9b
+    call  check_collision
     test  al, al
-    jz    .fell
+    jz    .cancel_lock           ; piece can fall again - cancel lock timer
 
-    ; auto-locked
+    ; Still on ground - check if 500 ms have elapsed
+    call  GetTickCount64
+    mov   rcx, [lock_time]
+    sub   rax, rcx
+    cmp   rax, 500
+    jb    .sleep                 ; not yet
+
+    ; Lock delay expired: lock the piece
+    call  erase_piece
+    call  soft_drop              ; calls lock_piece internally
+    mov   qword [lock_time], 0
     call  post_lock
     test  al, al
     jnz   .do_game_over
     jmp   .sleep
 
-.fell:
+.cancel_lock:
+    mov   qword [lock_time], 0
+
+    ; Fall timer check
+.fall_check:
+    call  get_fall_delay         ; EAX = delay ms
+    push  rax
+    call  GetTickCount64
+    mov   rcx, [fall_time]
+    sub   rax, rcx               ; elapsed ms
+    pop   rcx                    ; delay ms
+    cmp   rax, rcx
+    jb    .sleep
+
+    ; Fall timer fired - can the piece move down?
+    movsx r9d, byte [cur_y]
+    inc   r9d
+    movzx ecx, byte [cur_type]
+    movzx edx, byte [cur_rot]
+    movzx r8d, byte [cur_x]
+    mov   r8b, r8b
+    mov   r9b, r9b
+    call  check_collision
+    test  al, al
+    jnz   .on_ground             ; piece is resting on something
+
+    ; Piece can fall
+    call  erase_piece
+    call  soft_drop
+    call  GetTickCount64
+    mov   [fall_time], rax       ; reset fall timer after each step
     call  show_piece
     call  draw_hud
     call  flush_buf
+    jmp   .sleep
+
+.on_ground:
+    ; Fall timer fired but piece can't fall - start lock timer if not yet running
+    cmp   qword [lock_time], 0
+    jne   .sleep
+    call  GetTickCount64
+    mov   [lock_time], rax
+    mov   [fall_time], rax       ; reset fall timer
 
 .sleep:
     call  flush_buf
