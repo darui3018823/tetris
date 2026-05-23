@@ -66,6 +66,15 @@ STR_C5      db "ESC :Quit",0
 STR_GO      db "GAME OVER",0
 STR_RST     db "R=Restart",0
 
+STR_SINGLE  db "SINGLE",0
+STR_DOUBLE  db "DOUBLE",0
+STR_TRIPLE  db "TRIPLE",0
+STR_TETRIS  db "TETRIS!!",0
+STR_TSPIN   db "T-SPIN",0
+STR_TS_S    db "T-SPIN SINGLE",0
+STR_TS_D    db "T-SPIN DOUBLE",0
+STR_TS_T    db "T-SPIN TRIPLE",0
+
 ; Piece colors: index = piece type (1-7), value = ANSI bg color code
 piece_bg_colors:
     db 0        ; 0 = empty (unused)
@@ -143,6 +152,7 @@ score:          resq 1
 level:          resb 1
 lines_cleared:  resd 1
 game_over_flag: resb 1          ; 0=play, 1=over, 2=restart
+action_ptr:     resq 1          ; pointer to action string, 0=none
 
 fall_time:      resq 1          ; tick of last gravity step
 lock_time:      resq 1          ; tick when piece first touched ground (0=airborne)
@@ -518,6 +528,81 @@ check_collision:
     ret
 
 ; ═════════════════════════════════════════════════════════════════════════════
+; CORNER_OCCUPIED: ECX=row, EDX=col → AL=1 if wall or occupied board cell
+; ═════════════════════════════════════════════════════════════════════════════
+corner_occupied:
+    test  ecx, ecx
+    js    .occ
+    cmp   ecx, BOARD_ROWS
+    jge   .occ
+    test  edx, edx
+    js    .occ
+    cmp   edx, BOARD_COLS
+    jge   .occ
+    imul  ecx, BOARD_COLS
+    add   ecx, edx
+    lea   r10, [board]
+    movzx eax, byte [r10 + rcx]
+    test  eax, eax
+    jnz   .occ
+    xor   eax, eax
+    ret
+.occ:
+    mov   eax, 1
+    ret
+
+; ═════════════════════════════════════════════════════════════════════════════
+; CHECK_TSPIN: 3-corner rule for current T piece
+; Out: AL=1 T-spin, AL=0 not (or not a T piece)
+; ═════════════════════════════════════════════════════════════════════════════
+check_tspin:
+    push  r12
+    push  r13
+    push  rbx
+    sub   rsp, 32
+
+    movzx eax, byte [cur_type]
+    cmp   eax, 2                ; T piece = type index 2
+    jne   .no_ts
+
+    movsx r12d, byte [cur_x]
+    movsx r13d, byte [cur_y]
+    xor   ebx, ebx              ; corner count
+
+    mov   ecx, r13d             ; TL
+    mov   edx, r12d
+    call  corner_occupied
+    add   ebx, eax
+
+    mov   ecx, r13d             ; TR
+    lea   edx, [r12d + 2]
+    call  corner_occupied
+    add   ebx, eax
+
+    lea   ecx, [r13d + 2]       ; BL
+    mov   edx, r12d
+    call  corner_occupied
+    add   ebx, eax
+
+    lea   ecx, [r13d + 2]       ; BR
+    lea   edx, [r12d + 2]
+    call  corner_occupied
+    add   ebx, eax
+
+    cmp   ebx, 3
+    jl    .no_ts
+    mov   eax, 1
+    jmp   .ts_done
+.no_ts:
+    xor   eax, eax
+.ts_done:
+    add   rsp, 32
+    pop   rbx
+    pop   r13
+    pop   r12
+    ret
+
+; ═════════════════════════════════════════════════════════════════════════════
 ; DRAW_CELL: render one board cell
 ; In:  CL=board_row, DL=board_col, R8B=color_type (0=empty)
 ; ═════════════════════════════════════════════════════════════════════════════
@@ -803,6 +888,45 @@ draw_hud:
     call  buf_byte
     call  buf_byte
     call  buf_byte
+    ret
+
+; ═════════════════════════════════════════════════════════════════════════════
+; DRAW_ACTION: display current action text in HUD (row HUD_ROW+15)
+; ═════════════════════════════════════════════════════════════════════════════
+draw_action:
+    push  rbp
+    mov   rbp, rsp
+    sub   rsp, 32
+
+    mov   ecx, HUD_ROW + 15
+    mov   edx, HUD_COL
+    call  goto_xy
+
+    ; Erase previous action text (16 spaces covers longest string)
+    mov   r10d, 16
+.da_clr:
+    mov   al, ' '
+    call  buf_byte
+    dec   r10d
+    jnz   .da_clr
+
+    ; Write action string if set
+    mov   rcx, [action_ptr]
+    test  rcx, rcx
+    jz    .da_done
+
+    mov   ecx, HUD_ROW + 15
+    mov   edx, HUD_COL
+    call  goto_xy
+    lea   rcx, [ESC_BOLD]
+    call  buf_cstr
+    mov   rcx, [action_ptr]
+    call  buf_cstr
+    call  buf_reset
+
+.da_done:
+    add   rsp, 32
+    pop   rbp
     ret
 
 ; ═════════════════════════════════════════════════════════════════════════════
@@ -1235,11 +1359,56 @@ hard_drop:
 ; Returns: AL=1 game over
 ; ═════════════════════════════════════════════════════════════════════════════
 post_lock:
-    PROC_ENTER
+    push  rbp
+    mov   rbp, rsp
+    push  r12
+    push  r13
+    sub   rsp, 32               ; shadow space (stack 16-aligned here)
 
-    call  clear_lines
+    ; T-spin check FIRST, before clear_lines removes T's cells from board
+    call  check_tspin
+    movzx r13d, al              ; r13d = 1 if T-spin
+
+    call  clear_lines           ; EAX = lines cleared
+    mov   r12d, eax             ; r12d = lines cleared
+
+    ; Determine action string ─────────────────────────────────────────────────
+    xor   eax, eax              ; default: no action (null)
+    test  r13d, r13d
+    jz    .pl_no_ts
+
+    lea   rax, [STR_TSPIN]      ; T-Spin (0 lines)
+    test  r12d, r12d
+    jz    .pl_set
+    lea   rax, [STR_TS_S]
+    cmp   r12d, 1
+    je    .pl_set
+    lea   rax, [STR_TS_D]
+    cmp   r12d, 2
+    je    .pl_set
+    lea   rax, [STR_TS_T]
+    jmp   .pl_set
+
+.pl_no_ts:
+    test  r12d, r12d
+    jz    .pl_set               ; 0 lines, no tspin → null
+    lea   rax, [STR_SINGLE]
+    cmp   r12d, 1
+    je    .pl_set
+    lea   rax, [STR_DOUBLE]
+    cmp   r12d, 2
+    je    .pl_set
+    lea   rax, [STR_TRIPLE]
+    cmp   r12d, 3
+    je    .pl_set
+    lea   rax, [STR_TETRIS]
+.pl_set:
+    mov   [action_ptr], rax
+
+    mov   eax, r12d
     call  update_score
     call  draw_board
+    call  draw_action
     call  draw_next_preview
     call  spawn_piece
     call  draw_next_preview
@@ -1253,21 +1422,26 @@ post_lock:
     mov   r9b, r9b
     call  check_collision
     test  al, al
-    jz    .ok
+    jz    .pl_ok
 
-    ; game over
     call  show_piece
     call  draw_hud
     call  flush_buf
     mov   al, 1
-    PROC_LEAVE
+    jmp   .pl_exit
 
-.ok:
+.pl_ok:
     call  show_piece
     call  draw_hud
     call  flush_buf
     xor   al, al
-    PROC_LEAVE
+
+.pl_exit:
+    add   rsp, 32
+    pop   r13
+    pop   r12
+    pop   rbp
+    ret
 
 ; ═════════════════════════════════════════════════════════════════════════════
 ; HANDLE_INPUT → EAX: 0=nothing, 1=redraw done, 2=locked
@@ -1512,6 +1686,7 @@ init_game:
     mov   byte [level],     1
     mov   dword [lines_cleared], 0
     mov   byte [game_over_flag], 0
+    mov   qword [action_ptr],  0
     mov   byte [prev_left],   0
     mov   byte [prev_right],  0
     mov   byte [prev_up],     0
@@ -1543,6 +1718,7 @@ full_redraw:
     call  show_piece
     call  draw_next_preview
     call  draw_hud
+    call  draw_action
     call  flush_buf
 
     PROC_LEAVE
