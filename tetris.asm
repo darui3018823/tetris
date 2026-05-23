@@ -394,6 +394,10 @@ cleanup_console:
     call  buf_cstr
     lea   rcx, [ESC_RESET]
     call  buf_cstr
+    ; Move cursor below board so the shell prompt appears there
+    mov   ecx, BOARD_Y + BOARD_ROWS + 1
+    xor   edx, edx
+    call  goto_xy
     call  flush_buf
     PROC_LEAVE
 
