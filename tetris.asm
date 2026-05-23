@@ -1657,8 +1657,8 @@ handle_input:
 game_over_screen:
     PROC_ENTER
 
-    mov   ecx, BOARD_Y + BOARD_ROWS / 2 - 1
-    mov   edx, BOARD_X + 1
+    mov   ecx, BOARD_Y + BOARD_ROWS + 1
+    mov   edx, BOARD_X - 1
     call  goto_xy
     lea   rcx, [ESC_BOLD]
     call  buf_cstr
@@ -1666,8 +1666,8 @@ game_over_screen:
     call  buf_cstr
     call  buf_reset
 
-    mov   ecx, BOARD_Y + BOARD_ROWS / 2
-    mov   edx, BOARD_X + 1
+    mov   ecx, BOARD_Y + BOARD_ROWS + 2
+    mov   edx, BOARD_X - 1
     call  goto_xy
     lea   rcx, [STR_RST]
     call  buf_cstr
