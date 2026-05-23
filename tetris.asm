@@ -1593,12 +1593,35 @@ handle_input:
     and   eax, 0x8000
     jz    .chk_space
 
-    call  erase_piece
-    call  soft_drop
+    ; Check if the piece can move down without locking immediately
+    movsx r9d, byte [cur_y]
+    inc   r9d
+    movzx ecx, byte [cur_type]
+    movzx edx, byte [cur_rot]
+    movzx r8d, byte [cur_x]
+    mov   r8b, r8b
+    mov   r9b, r9b
+    call  check_collision
     test  al, al
-    jnz   .locked_by_input
+    jnz   .soft_grounded
+
+    ; Piece can fall: erase, move down one cell, redraw
+    call  erase_piece
+    movsx eax, byte [cur_y]
+    inc   eax
+    mov   [cur_y], al
+    call  GetTickCount64
+    mov   [fall_time], rax
     call  show_piece
     mov   r10d, 1
+    jmp   .chk_space
+
+.soft_grounded:
+    ; Already on ground - start lock delay for grace period (no immediate lock)
+    cmp   qword [lock_time], 0
+    jne   .chk_space
+    call  GetTickCount64
+    mov   [lock_time], rax
     jmp   .chk_space
 
     ; ── SPACE (hard drop) ────────────────────────────────────────────────────
