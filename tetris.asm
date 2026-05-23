@@ -445,7 +445,7 @@ check_collision:
 
     movzx r12d, cl          ; type
     movzx r13d, dl          ; rot
-    movzx r14d, r8b         ; px
+    movsx r14d, r8b         ; px (signed: negative = piece origin left of board)
     movsx r15d, r9b         ; py (signed)
 
     xor   ebx, ebx          ; piece row 0..3
@@ -639,7 +639,7 @@ draw_piece:
     cmp   ebx, BOARD_ROWS
     jge   .pc_next
 
-    movzx ecx, byte [cur_x]
+    movsx ecx, byte [cur_x]
     add   ecx, r14d         ; board col
     js    .pc_next
     cmp   ecx, BOARD_COLS
@@ -929,7 +929,7 @@ lock_piece:
     cmp   eax, BOARD_ROWS
     jge   .pc_next
 
-    movzx ecx, byte [cur_x]
+    movsx ecx, byte [cur_x]
     add   ecx, r8d
     js    .pc_next
     cmp   ecx, BOARD_COLS
