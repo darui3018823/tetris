@@ -75,6 +75,10 @@ STR_TS_S    db "T-SPIN SINGLE",0
 STR_TS_D    db "T-SPIN DOUBLE",0
 STR_TS_T    db "T-SPIN TRIPLE",0
 
+STR_TESTARG db "--testmode",0
+STR_PASS    db "PASS",0
+STR_FAIL    db "FAIL",0
+
 ; Piece colors: index = piece type (1-7), value = ANSI bg color code
 piece_bg_colors:
     db 0        ; 0 = empty (unused)
@@ -153,6 +157,9 @@ level:          resb 1
 lines_cleared:  resd 1
 game_over_flag: resb 1          ; 0=play, 1=over, 2=restart
 action_ptr:     resq 1          ; pointer to action string, 0=none
+test_mode:      resb 1
+test_pass_cnt:  resd 1
+test_fail_cnt:  resd 1
 
 fall_time:      resq 1          ; tick of last gravity step
 lock_time:      resq 1          ; tick when piece first touched ground (0=airborne)
@@ -187,6 +194,7 @@ extern GetTickCount64
 extern Sleep
 extern SetConsoleOutputCP
 extern ExitProcess
+extern GetCommandLineA
 
 ; ─── Macros ──────────────────────────────────────────────────────────────────
 %define SH 32                   ; shadow space size
@@ -1706,6 +1714,424 @@ init_game:
     PROC_LEAVE
 
 ; ═════════════════════════════════════════════════════════════════════════════
+; TEST MODE  (--testmode flag)
+; ═════════════════════════════════════════════════════════════════════════════
+
+TEST_COUNT equ 7        ; number of automated test cases
+
+; ZERO_BOARD: zero all 200 board cells (no Win32 calls, no shadow needed)
+zero_board:
+    push  rdi
+    push  rcx
+    lea   rdi, [board]
+    xor   eax, eax
+    mov   ecx, 200
+    rep   stosb
+    pop   rcx
+    pop   rdi
+    ret
+
+; CHECK_CMDLINE: set test_mode=1 if "--testmode" is in the command line
+check_cmdline:
+    push  rbp
+    push  r12
+    push  r13
+    push  r14
+    push  r15
+    sub   rsp, 32               ; 5 callee-saved pushes → 16-aligned
+    call  GetCommandLineA
+    mov   r12, rax              ; r12 = full command-line string (haystack)
+.cc_outer:
+    movzx eax, byte [r12]
+    test  al, al
+    jz    .cc_done
+    lea   r13, [STR_TESTARG]    ; r13 = needle ptr
+    mov   r14, r12              ; r14 = current match position in haystack
+.cc_inner:
+    movzx eax, byte [r13]
+    test  al, al
+    jz    .cc_found             ; reached end of needle → full match
+    movzx r15d, byte [r14]
+    cmp   al, r15b
+    jne   .cc_miss
+    inc   r13
+    inc   r14
+    jmp   .cc_inner
+.cc_miss:
+    inc   r12
+    jmp   .cc_outer
+.cc_found:
+    mov   byte [test_mode], 1
+.cc_done:
+    add   rsp, 32
+    pop   r15
+    pop   r14
+    pop   r13
+    pop   r12
+    pop   rbp
+    ret
+
+; ─── Board fill macro ────────────────────────────────────────────────────────
+; FILL_ROW9 offset: fill board[offset .. offset+8] with color 1 (RAX = board base)
+%macro FILL_ROW9 1
+    mov   byte [rax + %1 + 0], 1
+    mov   byte [rax + %1 + 1], 1
+    mov   byte [rax + %1 + 2], 1
+    mov   byte [rax + %1 + 3], 1
+    mov   byte [rax + %1 + 4], 1
+    mov   byte [rax + %1 + 5], 1
+    mov   byte [rax + %1 + 6], 1
+    mov   byte [rax + %1 + 7], 1
+    mov   byte [rax + %1 + 8], 1
+%endmacro
+
+; ─── Test setup functions ────────────────────────────────────────────────────
+; Each sets up board[] and cur_type/rot/x/y for the test.
+; These are leaf functions and do not call Win32.
+
+; SINGLE: row 19 cols 0-8; vertical I-piece at col 9 completes row 19
+test_setup_1:
+    lea   rax, [board]
+    FILL_ROW9 190               ; row 19 = offset 190
+    mov   byte [cur_type], 0    ; I
+    mov   byte [cur_rot],  1    ; vertical
+    mov   byte [cur_x],    8
+    mov   byte [cur_y],    19
+    ret
+
+; DOUBLE: rows 18-19 cols 0-8; I-piece fills col 9 of both rows
+test_setup_2:
+    lea   rax, [board]
+    FILL_ROW9 180
+    FILL_ROW9 190
+    mov   byte [cur_type], 0
+    mov   byte [cur_rot],  1
+    mov   byte [cur_x],    8
+    mov   byte [cur_y],    18
+    ret
+
+; TRIPLE: rows 17-19 cols 0-8
+test_setup_3:
+    lea   rax, [board]
+    FILL_ROW9 170
+    FILL_ROW9 180
+    FILL_ROW9 190
+    mov   byte [cur_type], 0
+    mov   byte [cur_rot],  1
+    mov   byte [cur_x],    8
+    mov   byte [cur_y],    17
+    ret
+
+; TETRIS: rows 16-19 cols 0-8
+test_setup_4:
+    lea   rax, [board]
+    FILL_ROW9 160
+    FILL_ROW9 170
+    FILL_ROW9 180
+    FILL_ROW9 190
+    mov   byte [cur_type], 0
+    mov   byte [cur_rot],  1
+    mov   byte [cur_x],    8
+    mov   byte [cur_y],    16
+    ret
+
+; T-SPIN (0 lines): block at (17,3) gives TL corner; T locks at (18,4) and
+;   (19,3-5); BL=(19,3) and BR=(19,5) come from T itself → 3 corners
+test_setup_5:
+    lea   rax, [board]
+    mov   byte [rax + 173], 1   ; board[17*10+3] = TL corner
+    mov   byte [cur_type], 2    ; T
+    mov   byte [cur_rot],  0
+    mov   byte [cur_x],    3
+    mov   byte [cur_y],    17
+    ret
+
+; T-SPIN SINGLE: TL block + row 19 cols 0-2,6-9; T fills cols 3-5 → complete
+test_setup_6:
+    lea   rax, [board]
+    mov   byte [rax + 173], 1   ; (17,3) TL corner
+    mov   byte [rax + 190], 1   ; row 19 col 0
+    mov   byte [rax + 191], 1
+    mov   byte [rax + 192], 1   ; col 2
+    mov   byte [rax + 196], 1   ; col 6
+    mov   byte [rax + 197], 1
+    mov   byte [rax + 198], 1
+    mov   byte [rax + 199], 1   ; col 9
+    mov   byte [cur_type], 2
+    mov   byte [cur_rot],  0
+    mov   byte [cur_x],    3
+    mov   byte [cur_y],    17
+    ret
+
+; T-SPIN DOUBLE: TL block + row 18 cols 0-3,5-9 + row 19 cols 0-2,6-9
+test_setup_7:
+    lea   rax, [board]
+    mov   byte [rax + 173], 1   ; (17,3) TL corner
+    mov   byte [rax + 180], 1   ; row 18 col 0
+    mov   byte [rax + 181], 1
+    mov   byte [rax + 182], 1
+    mov   byte [rax + 183], 1   ; col 3
+    mov   byte [rax + 185], 1   ; col 5
+    mov   byte [rax + 186], 1
+    mov   byte [rax + 187], 1
+    mov   byte [rax + 188], 1
+    mov   byte [rax + 189], 1   ; col 9
+    mov   byte [rax + 190], 1   ; row 19 col 0
+    mov   byte [rax + 191], 1
+    mov   byte [rax + 192], 1   ; col 2
+    mov   byte [rax + 196], 1   ; col 6
+    mov   byte [rax + 197], 1
+    mov   byte [rax + 198], 1
+    mov   byte [rax + 199], 1   ; col 9
+    mov   byte [cur_type], 2
+    mov   byte [cur_rot],  0
+    mov   byte [cur_x],    3
+    mov   byte [cur_y],    17
+    ret
+
+; ─── Dispatch: ECX=index → tail-call to test_setup_N ────────────────────────
+test_dispatch_setup:
+    cmp   ecx, 0
+    je    test_setup_1
+    cmp   ecx, 1
+    je    test_setup_2
+    cmp   ecx, 2
+    je    test_setup_3
+    cmp   ecx, 3
+    je    test_setup_4
+    cmp   ecx, 4
+    je    test_setup_5
+    cmp   ecx, 5
+    je    test_setup_6
+    jmp   test_setup_7
+
+; test_dispatch_expected: ECX=index → RAX=expected action string ptr
+test_dispatch_expected:
+    cmp   ecx, 0
+    je    .tde_single
+    cmp   ecx, 1
+    je    .tde_double
+    cmp   ecx, 2
+    je    .tde_triple
+    cmp   ecx, 3
+    je    .tde_tetris
+    cmp   ecx, 4
+    je    .tde_tspin
+    cmp   ecx, 5
+    je    .tde_ts_s
+    lea   rax, [STR_TS_D]
+    ret
+.tde_single:
+    lea   rax, [STR_SINGLE]
+    ret
+.tde_double:
+    lea   rax, [STR_DOUBLE]
+    ret
+.tde_triple:
+    lea   rax, [STR_TRIPLE]
+    ret
+.tde_tetris:
+    lea   rax, [STR_TETRIS]
+    ret
+.tde_tspin:
+    lea   rax, [STR_TSPIN]
+    ret
+.tde_ts_s:
+    lea   rax, [STR_TS_S]
+    ret
+
+; ─── DRAW_TEST_RESULT ────────────────────────────────────────────────────────
+; RCX = test name ptr, RDX = PASS/FAIL string ptr
+; Overwrites HUD rows 16-18 with test name, result, and pass/fail counts.
+draw_test_result:
+    push  rbp
+    push  r12
+    push  r13
+    sub   rsp, 32               ; 3 pushes → 16-aligned
+
+    mov   r12, rcx              ; save name ptr
+    mov   r13, rdx              ; save pass/fail ptr
+
+    ; Row HUD_ROW+16: test name
+    mov   ecx, HUD_ROW + 16
+    mov   edx, HUD_COL
+    call  goto_xy
+    mov   rcx, r12
+    call  buf_cstr
+    mov   al, ' '               ; trailing spaces to overwrite longer prev text
+    call  buf_byte
+    call  buf_byte
+    call  buf_byte
+
+    ; Row HUD_ROW+17: PASS or FAIL
+    mov   ecx, HUD_ROW + 17
+    mov   edx, HUD_COL
+    call  goto_xy
+    mov   rcx, r13
+    call  buf_cstr
+    mov   al, ' '
+    call  buf_byte
+    call  buf_byte
+    call  buf_byte
+    call  buf_byte
+    call  buf_byte
+    call  buf_byte
+    call  buf_byte
+    call  buf_byte
+    call  buf_byte
+
+    ; Row HUD_ROW+18: P:N F:N running totals
+    mov   ecx, HUD_ROW + 18
+    mov   edx, HUD_COL
+    call  goto_xy
+    mov   al, 'P'
+    call  buf_byte
+    mov   al, ':'
+    call  buf_byte
+    mov   eax, [test_pass_cnt]
+    call  buf_uint
+    mov   al, ' '
+    call  buf_byte
+    mov   al, 'F'
+    call  buf_byte
+    mov   al, ':'
+    call  buf_byte
+    mov   eax, [test_fail_cnt]
+    call  buf_uint
+    mov   al, ' '
+    call  buf_byte
+    call  buf_byte
+
+    add   rsp, 32
+    pop   r13
+    pop   r12
+    pop   rbp
+    ret
+
+; ─── RUN_TESTS ────────────────────────────────────────────────────────────────
+; Infinite loop: cycles through TEST_COUNT test cases, displays PASS/FAIL.
+run_tests:
+    push  rbp
+    push  r12
+    push  r13
+    push  r14
+    push  r15
+    sub   rsp, 32               ; 5 pushes → 16-aligned
+
+    mov   dword [test_pass_cnt], 0
+    mov   dword [test_fail_cnt], 0
+
+    lea   rcx, [ESC_CLEAR]
+    call  buf_cstr
+    call  draw_border
+    call  draw_board
+    call  draw_hud
+    call  flush_buf
+
+.rt_outer:
+    xor   r12d, r12d            ; test index 0..TEST_COUNT-1
+
+.rt_test:
+    cmp   r12d, TEST_COUNT
+    jge   .rt_outer             ; all tests done → restart cycle
+
+    ; reset board and game state for this test
+    call  zero_board
+    mov   qword [score],         0
+    mov   byte  [level],         1
+    mov   dword [lines_cleared], 0
+    mov   qword [action_ptr],    0
+    mov   qword [lock_time],     0
+
+    ; run the board/piece setup for test r12d
+    mov   ecx, r12d
+    call  test_dispatch_setup
+
+    ; save expected action string ptr
+    mov   ecx, r12d
+    call  test_dispatch_expected
+    mov   r13, rax
+
+    ; lock the test piece onto the board
+    call  lock_piece
+
+    ; T-spin check (must precede clear_lines)
+    call  check_tspin
+    mov   r14b, al              ; r14b = 1 if T-spin detected
+
+    ; clear complete lines
+    call  clear_lines
+    mov   r15d, eax             ; r15d = lines cleared
+
+    ; update score for visual display
+    mov   eax, r15d
+    call  update_score
+
+    ; determine action_ptr (mirrors post_lock logic exactly)
+    xor   rax, rax
+    test  r14d, r14d
+    jz    .rt_no_ts
+    lea   rax, [STR_TSPIN]
+    test  r15d, r15d
+    jz    .rt_set_act
+    lea   rax, [STR_TS_S]
+    cmp   r15d, 1
+    je    .rt_set_act
+    lea   rax, [STR_TS_D]
+    cmp   r15d, 2
+    je    .rt_set_act
+    lea   rax, [STR_TS_T]
+    jmp   .rt_set_act
+.rt_no_ts:
+    test  r15d, r15d
+    jz    .rt_set_act
+    lea   rax, [STR_SINGLE]
+    cmp   r15d, 1
+    je    .rt_set_act
+    lea   rax, [STR_DOUBLE]
+    cmp   r15d, 2
+    je    .rt_set_act
+    lea   rax, [STR_TRIPLE]
+    cmp   r15d, 3
+    je    .rt_set_act
+    lea   rax, [STR_TETRIS]
+.rt_set_act:
+    mov   [action_ptr], rax
+
+    ; draw board state and action text
+    call  draw_board
+    call  draw_action
+
+    ; verify: same string pointer means correct result
+    mov   rax, [action_ptr]
+    cmp   rax, r13
+    jne   .rt_fail
+
+    inc   dword [test_pass_cnt]
+    mov   ecx, r12d
+    call  test_dispatch_expected
+    mov   rcx, rax
+    lea   rdx, [STR_PASS]
+    call  draw_test_result
+    jmp   .rt_show
+
+.rt_fail:
+    inc   dword [test_fail_cnt]
+    mov   ecx, r12d
+    call  test_dispatch_expected
+    mov   rcx, rax
+    lea   rdx, [STR_FAIL]
+    call  draw_test_result
+
+.rt_show:
+    call  draw_hud
+    call  flush_buf
+    mov   ecx, 2000
+    call  Sleep
+    inc   r12d
+    jmp   .rt_test
+
+; ═════════════════════════════════════════════════════════════════════════════
 ; FULL_REDRAW: clear screen and draw everything
 ; ═════════════════════════════════════════════════════════════════════════════
 full_redraw:
@@ -1734,8 +2160,11 @@ main:
     sub   rsp, 32           ; shadow space (RSP now 16-aligned)
 
     call  init_console
+    call  check_cmdline
 
 .restart:
+    cmp   byte [test_mode], 1
+    je    .do_test_mode
     call  init_game
     call  full_redraw
 
@@ -1836,6 +2265,11 @@ main:
     mov   ecx, 16
     call  Sleep
     jmp   .game_loop
+
+.do_test_mode:
+    call  init_game
+    call  run_tests             ; loops forever
+    jmp   .exit
 
 .do_game_over:
     call  game_over_screen
