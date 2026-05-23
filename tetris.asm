@@ -1226,7 +1226,7 @@ spawn_piece:
     mov   [cur_type], al
     mov   byte [cur_rot], 0
     mov   byte [cur_x],   (BOARD_COLS / 2) - 2
-    mov   byte [cur_y],   0
+    mov   byte [cur_y],   -1
 
     call  lcg_rand
     mov   [next_type], al
